@@ -36,6 +36,9 @@ MAX_VALID_JOBS = 16
 # (ckpool se queda un 2 %, public-pool nada).
 MIN_PAYOUT_PERCENT = 95.0
 STABLE_SESSION_SECONDS = 60.0
+# Tope de velocidad que suponemos por proceso de Python, para limitar las shares
+# a como mucho ~1 por segundo si el pool pide una dificultad minúscula.
+MAX_HASHRATE_PER_THREAD = 2e6
 # La dificultad de Bitcoin supera esto desde 2019: un trabajo por debajo es falso
 # (un pool que miente para mostrar "bloques" falsos o inundar el minero).
 MIN_NETWORK_DIFFICULTY = 1e12
@@ -73,9 +76,9 @@ class MinerConfig:
     password: str = "x"
     threads: int = field(default_factory=lambda: os.cpu_count() or 1)
     suggest_difficulty: float | None = 1
-    # Nunca se envían shares más fáciles que esto, aunque el pool lo permita:
-    # en solitario no dan dinero y así un pool no puede inundar la memoria.
-    min_share_difficulty: float = 1.0
+    # Nunca se envían shares más fáciles que esto, aunque el pool lo permita, para
+    # que un pool no pueda inundar el minero. None = automático (~1 share/s como mucho).
+    min_share_difficulty: float | None = None
     stats_interval: float = 30.0
     low_priority: bool = True
     prevent_sleep: bool = True
@@ -209,7 +212,10 @@ class Miner:
         self.difficulty = 1.0
         self.extranonce1 = b""
         self.extranonce2_size = 0
-        self._floor_target = difficulty_to_target(config.min_share_difficulty)
+        floor = config.min_share_difficulty
+        if floor is None:
+            floor = config.threads * MAX_HASHRATE_PER_THREAD / stats.HASHES_PER_DIFF1
+        self._floor_target = difficulty_to_target(floor)
         self._payout_kind: str | None = None
         self._payout_pct: float | None = None
         self._handshake_ok = False
@@ -298,6 +304,9 @@ class Miner:
                 except queue.Empty:
                     event = None
                 if event is not None:
+                    if event[0] == "notify":
+                        # Enviar lo encontrado antes de que un trabajo nuevo invalide los anteriores.
+                        self._drain_results(client)
                     try:
                         outcome = self._handle_event(client, event)
                     except (TypeError, ValueError, KeyError, IndexError, OverflowError) as exc:
@@ -403,7 +412,10 @@ class Miner:
             self.log(f"Trabajo no válido recibido del pool, se ignora ({pool_text(exc)}).")
             return
         if clean:
-            self._jobs.clear()
+            # Los trabajos sobre el mismo bloque anterior siguen valiendo (public-pool
+            # manda clean_jobs al cambiar la dificultad); los de otro bloque, no.
+            for seq in [s for s, old in self._jobs.items() if old["prevhash"] != job["prevhash"]]:
+                del self._jobs[seq]
         self._jobs[job["seq"]] = job
         while len(self._jobs) > MAX_VALID_JOBS:
             self._jobs.pop(next(iter(self._jobs)))
@@ -472,14 +484,14 @@ class Miner:
                 self.stale += 1
                 if result["is_block"]:
                     self.log(f"Se encontró un bloque ({result['hash']}) para un trabajo que ya no "
-                             "es válido: la red ya había avanzado o se cortó la conexión.")
+                             "es válido (la red ya había avanzado o se cortó la conexión).")
                 continue
             try:
                 request_id = client.submit(self.config.username, job["job_id"], result["extranonce2"],
                                            result["ntime"], result["nonce"])
             except OSError:
                 if result["is_block"]:
-                    self.log(f"¡Bloque encontrado pero no se pudo enviar! job={job['job_id']} "
+                    self.log(f"¡Bloque encontrado pero no se pudo enviar! job={pool_text(job['job_id'], 64)} "
                              f"extranonce1={job['extranonce1'].hex()} extranonce2={result['extranonce2']} "
                              f"ntime={result['ntime']} nonce={result['nonce']} hash={result['hash']}")
                 raise

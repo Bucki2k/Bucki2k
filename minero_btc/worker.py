@@ -140,13 +140,20 @@ def _mine_job(job, index, n_workers, job_queue, result_queue, hash_counts, stop_
     network_target = job["network_target"]
     # También informamos de hashes de dificultad >= 1 para la estadística de "mejor share".
     report_target = max(share_target, network_target, DIFF1_TARGET)
+    space = 1 << (8 * size)
+    # Valores de extranonce2 de este proceso: index, index + n, index + 2n... < space.
+    own_values = (space - index + n_workers - 1) // n_workers
+    tried = 0
     chunks = 0
     while True:
+        if tried >= own_values:
+            return None  # todos probados en este trabajo: esperar uno nuevo
         extranonce2_value = index + state["extranonce2_counter"] * n_workers
-        state["extranonce2_counter"] += 1
-        if extranonce2_value >= 1 << (8 * size):
+        if extranonce2_value >= space:
             state["extranonce2_counter"] = 0
-            return None  # espacio de extranonce2 agotado: esperar trabajo nuevo
+            extranonce2_value = index
+        state["extranonce2_counter"] += 1
+        tried += 1
         extranonce2 = extranonce2_value.to_bytes(size, "big")
         coinbase = build_coinbase(job["coinb1"], job["extranonce1"], extranonce2, job["coinb2"])
         prefix = build_header_prefix(job["version"], job["prevhash"],

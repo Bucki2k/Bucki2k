@@ -78,7 +78,9 @@ de media en encontrar un bloque, con la dificultad de octubre de 2026 (~132,7 T)
    pedirá tu dirección y la guardará en `minero_config.json` para las
    siguientes veces.
 
-Para parar, pulsa `Ctrl+C` o cierra la ventana.
+Para parar, pulsa `Ctrl+C` o cierra la ventana. Windows preguntará
+"¿Desea terminar el trabajo por lotes (S/N)?": da igual lo que contestes, el
+resumen ya se ha mostrado.
 
 ### Desde la línea de comandos (Windows, Linux o macOS)
 
@@ -99,7 +101,7 @@ En Linux y macOS usa `python3` en lugar de `py`.
 | `--trabajador` | Nombre de este equipo en el pool | nombre del PC |
 | `-t`, `--hilos` | Procesos de minado | todos los hilos de la CPU |
 | `--prioridad` | `baja` (PC usable) o `normal` | `baja` |
-| `--dificultad` | Dificultad mínima de las shares que se envían y que se pide al pool (`0` = no pedir ninguna) | `1` |
+| `--dificultad` | Dificultad de share que se pide al pool al conectar (`0` = no pedir ninguna) | `1` |
 | `--intervalo` | Segundos entre estadísticas | `30` |
 | `--benchmark` / `--segundos` | Medir la velocidad sin conectarse | 20 s |
 | `--no-guardar` | No guardar la configuración en `minero_config.json` | — |

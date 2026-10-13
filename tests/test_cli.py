@@ -91,3 +91,62 @@ class WorkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExtranonceWrapTests(unittest.TestCase):
+    def test_small_extranonce2_never_skips_a_job(self):
+        class Flag:
+            value = 0
+
+        class Sink(list):
+            put = list.append
+
+        state = {"extranonce2_counter": 0}
+        counts = [0] * 16
+        job_queue = mock.Mock()
+        job_queue.get_nowait.return_value = "siguiente"  # cada trabajo se interrumpe tras un bloque de nonces
+        for number in range(40):
+            job = {
+                "seq": number, "coinb1": b"\x01", "coinb2": b"\x02", "extranonce1": b"",
+                "extranonce2_size": 1, "merkle_branch": [], "prevhash": "00" * 32,
+                "version": "20000000", "nbits": "1d00ffff", "ntime": "66f00000",
+                "share_target": 0, "network_target": 0,
+            }
+            before = counts[3]
+            _mine_job(job, 3, 16, job_queue, Sink(), counts, Flag(), state)
+            self.assertGreater(counts[3], before, f"el trabajo {number} no se minó")
+
+
+class MinerJobTests(unittest.TestCase):
+    def make_miner(self, **kwargs):
+        from minero_btc.address import address_to_script_pubkey
+        from minero_btc.miner import Miner, MinerConfig
+        address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        config = MinerConfig(host="x", port=1, use_tls=False, address=address,
+                             script_pubkey=address_to_script_pubkey(address), **kwargs)
+        miner = Miner(config, log=lambda message: None)
+        miner.pool = mock.Mock()
+        miner.extranonce1, miner.extranonce2_size = b"\x00" * 4, 4
+        miner.min_network_difficulty = 0
+        return miner
+
+    @staticmethod
+    def notify(job_id, prevhash, clean):
+        return [job_id, prevhash, "01", "02", [], "20000000", "1d00ffff", "66f00000", clean]
+
+    def test_clean_jobs_keeps_jobs_on_the_same_block(self):
+        miner = self.make_miner(threads=2)
+        miner._on_notify(self.notify("a", "11" * 32, True))
+        miner._on_notify(self.notify("b", "11" * 32, True))  # p. ej. public-pool al cambiar la dificultad
+        self.assertEqual(sorted(j["job_id"] for j in miner._jobs.values()), ["a", "b"])
+        miner._on_notify(self.notify("c", "22" * 32, True))  # bloque nuevo en la red
+        self.assertEqual([j["job_id"] for j in miner._jobs.values()], ["c"])
+
+    def test_automatic_share_floor(self):
+        miner = self.make_miner(threads=16)
+        floor = 16 * 2e6 / 2 ** 32  # como mucho ~1 share por segundo
+        self.assertEqual(miner._floor_target, difficulty_to_target(floor))
+        miner.difficulty = 1e-5  # el pool pide shares minúsculas
+        miner._on_notify(self.notify("a", "11" * 32, True))
+        job = next(iter(miner._jobs.values()))
+        self.assertEqual(job["share_target"], difficulty_to_target(floor))

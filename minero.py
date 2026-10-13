@@ -11,6 +11,7 @@ Ejecuta ``python minero.py --help`` para ver todas las opciones.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import multiprocessing
 import os
@@ -42,8 +43,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("-t", "--hilos", type=int, default=os.cpu_count() or 1,
                         help="procesos de minado (por defecto, todos los hilos de tu CPU)")
     parser.add_argument("--dificultad", type=float, default=1,
-                        help="dificultad mínima de las shares que se envían y que se pide al pool "
-                             "(por defecto 1; 0 = no pedir ninguna al pool)")
+                        help="dificultad de share que se pide al pool al conectar "
+                             "(por defecto 1; 0 = no pedir ninguna)")
     parser.add_argument("--prioridad", choices=["baja", "normal"], default="baja",
                         help="'baja' deja el PC usable mientras mina (por defecto)")
     parser.add_argument("--intervalo", type=float, default=30,
@@ -114,11 +115,24 @@ def resolve_wallet(args, saved: dict) -> tuple[str, bytes]:
             print(f"Dirección no válida: {exc}")
         if not interactive:
             raise SystemExit(1)
+        _discard_pending_input()
         candidate = None
 
 
+def _discard_pending_input() -> None:
+    """Si se pegaron varias líneas (p. ej. una frase semilla), no usarlas como direcciones."""
+    if sys.platform != "win32":
+        return
+    try:
+        import msvcrt
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+    except (ImportError, OSError):
+        pass
+
+
 def main(argv=None) -> int:
-    _prepare_console()
+    _safe_output()
     args = parse_args(argv)
     if args.benchmark:
         run_benchmark(args.hilos, args.segundos, args.prioridad == "baja")
@@ -144,13 +158,13 @@ def main(argv=None) -> int:
         address=address, script_pubkey=script_pubkey,
         worker_name=worker_name, password=args.password,
         threads=args.hilos, suggest_difficulty=args.dificultad or None,
-        min_share_difficulty=args.dificultad or 1.0,
         stats_interval=args.intervalo, low_priority=args.prioridad == "baja",
         prevent_sleep=not args.permitir_suspension,
     )
     log_line(f"minero-btc {__version__} | pool {host}:{port} | {args.hilos} procesos | "
              f"prioridad {args.prioridad}")
     log_line("Minería en solitario: es una lotería. Pulsa Ctrl+C para parar.")
+    _disable_quick_edit()
     Miner(config).run()
     return 0
 
@@ -161,17 +175,21 @@ def _clean_worker_name(name: str) -> str:
     return cleaned[:32] or "minero"
 
 
-def _prepare_console() -> None:
-    """Salida a prueba de caracteres raros y, en Windows, sin el modo de selección rápida."""
+def _safe_output() -> None:
+    """Que un carácter raro nunca haga fallar la salida por consola."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
+
+
+def _disable_quick_edit() -> None:
+    """En Windows, con "edición rápida" un clic en la ventana congela el programa
+    (y con él el envío de shares y bloques) hasta pulsar Esc. Se desactiva solo
+    mientras se mina y se restaura al salir."""
     if sys.platform != "win32":
         return
-    # Con "edición rápida", un clic en la ventana congela el programa hasta pulsar
-    # Esc, y con él el envío de shares y bloques.
     try:
         import ctypes
         from ctypes import wintypes
@@ -183,8 +201,11 @@ def _prepare_console() -> None:
         handle = kernel32.GetStdHandle(-10 & 0xFFFFFFFF)  # STD_INPUT_HANDLE como DWORD
         mode = wintypes.DWORD()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            enable_quick_edit, enable_extended_flags = 0x0040, 0x0080
-            kernel32.SetConsoleMode(handle, (mode.value & ~enable_quick_edit) | enable_extended_flags)
+            enable_mouse_input, enable_quick_edit, enable_extended_flags = 0x0010, 0x0040, 0x0080
+            # Sin ENABLE_MOUSE_INPUT la rueda y el clic derecho (pegar) siguen funcionando.
+            new_mode = (mode.value & ~(enable_quick_edit | enable_mouse_input)) | enable_extended_flags
+            if kernel32.SetConsoleMode(handle, new_mode):
+                atexit.register(kernel32.SetConsoleMode, handle, mode.value)
     except (AttributeError, OSError):
         pass
 

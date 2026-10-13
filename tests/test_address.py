@@ -103,6 +103,27 @@ class AddressTests(unittest.TestCase):
                 with self.assertRaises(SecretDetectedError):
                     validate_payout_address(secret)
 
+    def test_links_with_labels_are_not_secrets(self):
+        p2tr = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+        p2wsh = "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"
+        for pasted in (f"bitcoin:{p2tr}?message=Gracias,Jason;hola", f"bitcoin:{p2wsh}?label=Mi PC",
+                       f"Bitcoin: {p2tr}", f"BITCOIN:{p2wsh.upper()}?label=Mi PC"):
+            with self.subTest(pasted=pasted):
+                self.assertIn(validate_payout_address(pasted)[0], (p2tr, p2wsh))
+        with self.assertRaises(AddressError) as ctx:
+            validate_payout_address(p2tr + ",")
+        self.assertNotIsInstance(ctx.exception, SecretDetectedError)
+
+    def test_mistyped_wif_is_still_a_secret(self):
+        typo = "KwdMAjGmerYanjeui5SHS7JkmpZvVipYvB2LJGU1ZxJwYvP98618"
+        with self.assertRaises(SecretDetectedError):
+            validate_payout_address(typo)
+
+    def test_single_word_gets_a_seed_hint(self):
+        with self.assertRaises(AddressError) as ctx:
+            validate_payout_address("abandon")
+        self.assertIn("frase semilla", str(ctx.exception))
+
     def test_whitespace_is_trimmed(self):
         address, _ = validate_payout_address("  bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4\n")
         self.assertEqual(address, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
