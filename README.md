@@ -19,7 +19,7 @@ de media en encontrar un bloque, con la dificultad de octubre de 2026 (~132,7 T)
 
 | Equipo | Velocidad aprox. | Tiempo medio hasta un bloque | Probabilidad en 1 año |
 |---|---|---|---|
-| Tu Ryzen 7 9800X3D con este minero | 8–12 MH/s | ~1.500–2.300 millones de años | 1 entre ~2.000 millones |
+| Tu Ryzen 7 9800X3D con este minero | ~10–15 MH/s | ~1.200–1.800 millones de años | 1 entre ~1.500 millones |
 | CPU con un minero en C optimizado | ~100 MH/s | ~180 millones de años | 1 entre 180 millones |
 | GPU de gama alta | ~5 GH/s | ~3,6 millones de años | 1 entre 3,6 millones |
 | Bitaxe (minero ASIC doméstico) | ~1 TH/s | ~18.000 años | 1 entre 18.000 |
@@ -42,12 +42,22 @@ de media en encontrar un bloque, con la dificultad de octubre de 2026 (~132,7 T)
 - Se conecta a **un solo pool** en solitario (por defecto `public-pool.io:3333`,
   sin comisión) con el protocolo Stratum v1, y reconecta solo si se cae.
 - **Comprueba que el pool te paga a ti:** lee la transacción *coinbase* de
-  cada trabajo y te dice qué parte de la recompensa iría a tu dirección. Si no
-  va a tu dirección, te avisa con un mensaje de ATENCIÓN.
-- Usa todos los hilos de tu CPU con **prioridad baja**, así que puedes seguir
-  usando el PC (y jugar) mientras mina.
-- Valida tu dirección (bc1q…, bc1p…, 1…, 3…) y **se niega a aceptar una frase
-  semilla o una clave privada** si la pegas por error.
+  cada trabajo y te dice qué parte de la recompensa iría a tu dirección. Si el
+  bloque no te paga, si te deja menos del 95 % o si el pool cambia el reparto
+  a mitad de sesión, te avisa con un mensaje de ATENCIÓN que se repite en cada
+  estadística.
+- Usa todos los hilos de tu CPU con **prioridad baja**, así que el PC sigue
+  respondiendo (navegar, vídeo…). En juegos que exprimen la CPU puedes notar
+  menos FPS: para el minero mientras juegas.
+- En Windows evita que el PC se **suspenda** mientras mina (la pantalla puede
+  apagarse), y desactiva la "edición rápida" de la consola, que congelaba el
+  programa al hacer clic en la ventana.
+- Valida tu dirección (bc1q…, bc1p…, 1…, 3…; también si pegas un enlace
+  `bitcoin:` de un QR) y **se niega a aceptar una frase semilla o una clave
+  privada** si la pegas por error.
+- Se protege de pools rotos o maliciosos: ignora mensajes malformados,
+  trabajos con una dificultad de red imposible y avalanchas de shares, y nunca
+  se cierra por un mensaje raro (reconecta).
 - Muestra cada 30 s tu velocidad, las shares aceptadas, tu mejor share y el
   tiempo medio que tardarías en encontrar un bloque.
 
@@ -89,10 +99,11 @@ En Linux y macOS usa `python3` en lugar de `py`.
 | `--trabajador` | Nombre de este equipo en el pool | nombre del PC |
 | `-t`, `--hilos` | Procesos de minado | todos los hilos de la CPU |
 | `--prioridad` | `baja` (PC usable) o `normal` | `baja` |
-| `--dificultad` | Dificultad de share que se pide al pool (`0` = no pedir) | `1` |
+| `--dificultad` | Dificultad mínima de las shares que se envían y que se pide al pool (`0` = no pedir ninguna) | `1` |
 | `--intervalo` | Segundos entre estadísticas | `30` |
 | `--benchmark` / `--segundos` | Medir la velocidad sin conectarse | 20 s |
 | `--no-guardar` | No guardar la configuración en `minero_config.json` | — |
+| `--permitir-suspension` | Dejar que Windows suspenda el PC aunque esté minando | — |
 
 ## Qué verás en pantalla
 
@@ -101,8 +112,8 @@ En Linux y macOS usa `python3` en lugar de `py`.
 [18:02:12] Conectado. Minando para bc1q... (trabajador 'JasonPC').
 [18:02:12] Dificultad de la red: 132.70 T (un bloque necesita un hash al menos así de difícil).
 [18:02:12] Comprobado: si encuentras este bloque, 3.14012345 BTC (100.0 % de la recompensa) van DIRECTAMENTE a tu dirección bc1q...
-[18:02:42] Velocidad: 10.12 MH/s | Shares: 0 aceptadas, 0 rechazadas
-[18:02:42] Tiempo medio hasta un bloque: 1,8 mil millones de años | Probabilidad en 1 año: 1 entre 1,8 mil millones
+[18:02:42] Velocidad: 12.31 MH/s | Shares: 0 aceptadas, 0 rechazadas
+[18:02:42] Tiempo medio hasta un bloque: 1,5 mil millones de años | Probabilidad en 1 año: 1 entre 1,5 mil millones
 ```
 
 - **Share:** un hash que cumple una dificultad pequeña que fija el pool. Sirve
@@ -180,5 +191,8 @@ py -m unittest discover -s tests -v
 Los tests incluyen el **bloque #1 real de Bitcoin** (el minero reconstruye su
 cabecera a partir de un trabajo Stratum y encuentra su nonce auténtico), los
 vectores oficiales de BIP173 y BIP350, y pruebas completas contra un pool
-simulado en tu propio equipo: shares válidas, reconexión, bloque encontrado y
-comprobación de a quién paga el pool. No se conectan a Internet.
+simulado en tu propio equipo: shares válidas, reconexión, bloque encontrado
+(también cuando el pool pide shares más difíciles que la red), comprobación de
+a quién paga el pool, un pool que te recorta el premio a mitad de sesión y un
+pool hostil que envía mensajes malformados. No se conectan a Internet. Pasan
+con Python 3.9, 3.10, 3.11, 3.12 y 3.13.

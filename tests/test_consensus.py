@@ -70,16 +70,16 @@ class HashingTests(unittest.TestCase):
         self.assertEqual([(n, hash_to_hex(d)) for n, d in found], [(BLOCK1_NONCE, BLOCK1_HASH)])
         self.assertEqual(nonce_to_hex(BLOCK1_NONCE), "9962e301")
 
-    def test_scan_generic_path_matches_brute_force(self):
+    def test_scan_matches_brute_force(self):
         prefix = bytes(range(76))
-        target = DIFF1_TARGET * 4096  # dificultad 1/4096: se usa el camino genérico
-        found = scan(prefix, 0, 3000, target)
-        expected = []
-        for nonce in range(3000):
-            digest = sha256d(prefix + nonce.to_bytes(4, "little"))
-            if int.from_bytes(digest, "little") <= target:
-                expected.append((nonce, digest))
-        self.assertEqual(found, expected)
+        digests = [sha256d(prefix + nonce.to_bytes(4, "little")) for nonce in range(3000)]
+        # Camino rápido (prefiltro del byte alto), su límite exacto y el camino genérico.
+        for target in (DIFF1_TARGET << 22, (1 << 248) - 1, 1 << 248, 1 << 250):
+            with self.subTest(target=hex(target)):
+                expected = [(nonce, digest) for nonce, digest in enumerate(digests)
+                            if int.from_bytes(digest, "little") <= target]
+                self.assertTrue(expected)
+                self.assertEqual(scan(prefix, 0, 3000, target), expected)
 
     def test_prevhash_word_swap_roundtrip(self):
         raw = bytes(range(32))

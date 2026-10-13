@@ -17,6 +17,7 @@ Orden de bytes, que es donde suelen fallar los mineros caseros:
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 from fractions import Fraction
 
@@ -60,8 +61,8 @@ def target_to_difficulty(target: int) -> float:
 
 
 def difficulty_to_target(difficulty: float) -> int:
-    if difficulty <= 0:
-        raise ValueError("la dificultad debe ser positiva")
+    if not math.isfinite(difficulty) or difficulty <= 0:
+        raise ValueError("la dificultad debe ser un número positivo")
     target = int(Fraction(DIFF1_TARGET) / Fraction(difficulty))
     return min(max(target, 1), MAX_TARGET)
 

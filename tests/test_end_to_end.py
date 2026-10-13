@@ -37,9 +37,11 @@ class MinerRun:
         self.stop = threading.Event()
         config = MinerConfig(host="127.0.0.1", port=pool.port, use_tls=False, address=ADDRESS,
                              script_pubkey=SCRIPT, worker_name="test", threads=threads,
-                             suggest_difficulty=1, stats_interval=2, low_priority=False)
+                             suggest_difficulty=1, min_share_difficulty=EASY_DIFFICULTY,
+                             stats_interval=2, low_priority=False, prevent_sleep=False)
         self.miner = Miner(config, log=self.lines.append, stop_event=self.stop)
         self.miner.reconnect_delay = 0.5
+        self.miner.min_network_difficulty = 0  # el pool falso usa dificultades de juguete
         self.thread = threading.Thread(target=self.miner.run, daemon=True)
 
     def __enter__(self):
@@ -110,12 +112,74 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("98.0 %", run.output())
 
     def test_block_found_is_reported(self):
-        # nbits de regtest: cualquier share es también un "bloque".
-        pool = self.make_pool(nbits="207fffff")
+        # Dificultad de red de juguete (2^-10): uno de cada 4 shares es un "bloque".
+        pool = self.make_pool(nbits="1e03fffc")
         with MinerRun(pool, threads=1) as run:
             self.assertTrue(wait_for(lambda: "El pool ACEPTÓ el bloque" in run.output(), 60), run.output())
         self.assertIn("BLOQUE ENCONTRADO", run.output())
         self.assertGreaterEqual(run.miner.blocks_found, 1)
+
+
+class HostilePoolTests(unittest.TestCase):
+    """Un pool malicioso o roto no debe poder tumbar el minero ni engañar al usuario."""
+
+    def test_survives_malformed_messages(self):
+        coinb1, coinb2 = make_coinbase_parts(SCRIPT, 312_500_000, 4 + 4)
+        bad_job = ('{"id":null,"method":"mining.notify","params":["bad","%s","%s","%s",[],'
+                   '"%s","%s","%s",false]}')
+        raw = (
+            '{"id":null,"method":"mining.set_difficulty","params":[1e400]}',
+            '{"id":null,"method":"mining.set_difficulty","params":["inf"]}',
+            '{"id":null,"method":"mining.set_difficulty","params":{"a":1}}',
+            '{"id":null,"method":"mining.set_extranonce","params":7}',
+            '{"id":null,"method":"mining.set_extranonce","params":["zz",4]}',
+            '{"id":[1],"result":true,"error":null}',
+            '{"id":null,"method":"client.show_message","params":["hola\\u001b[2A\\r\\ud800"]}',
+            '{"id":null,"method":"mining.notify","params":{"a":1}}',
+            bad_job % ("00" * 32, coinb1, coinb2, "20000000", "00000000", "66f00000"),
+            bad_job % ("00" * 32, coinb1, coinb2, "20 00 00", "1d00ffff", "66f00000"),
+            bad_job % ("00 00 " + "00" * 29, coinb1, coinb2, "20000000", "1d00ffff", "66f00000"),
+            bad_job % ("00" * 32, coinb1, coinb2, "20000000", "207fffff", "66f00000"),
+            "esto no es json",
+            "[" * 50_000,
+        )
+        pool = MockPool(coinb1=coinb1, coinb2=coinb2, difficulty=EASY_DIFFICULTY,
+                        raw_after_authorize=raw)
+        self.addCleanup(pool.close)
+        run = MinerRun(pool)
+        run.miner.min_network_difficulty = 1e-9  # rechaza 207fffff (2^-31), acepta 1d00ffff (1)
+        with run:
+            self.assertTrue(wait_for(lambda: pool.valid_shares() >= 3, 90), run.output())
+            self.assertEqual(run.miner.pool.alive(), 2, run.output())
+        output = run.output()
+        self.assertEqual(pool.connections, 1, output)  # ni se cayó ni entró en bucle de reconexión
+        self.assertIn("Dificultad no válida del pool ignorada", output)
+        self.assertIn("set_extranonce no válido", output)
+        self.assertIn("Trabajo no válido", output)
+        self.assertIn("dificultad de red imposible", output)
+        self.assertNotIn("\x1b", output)
+        self.assertNotIn("\r", output)
+        self.assertEqual(run.miner.blocks_found, 0)
+
+    def test_warns_when_pool_cuts_your_share_mid_session(self):
+        coinb1, coinb2 = make_coinbase_parts(SCRIPT, 312_500_000, 4 + 4)
+        _, stolen = make_coinbase_parts(SCRIPT, 1, 4 + 4, fee_script=OTHER_SCRIPT, fee_sats=312_499_999)
+        pool = MockPool(coinb1=coinb1, coinb2=coinb2, difficulty=1e6,
+                        followup_coinb2=stolen, followup_delay=1.0)
+        self.addCleanup(pool.close)
+        with MinerRun(pool, threads=1) as run:
+            self.assertTrue(wait_for(lambda: "solo te pagaría el 0.0 %" in run.output(), 30), run.output())
+        self.assertIn("100.0 %", run.output())
+
+    def test_block_is_submitted_even_above_share_difficulty(self):
+        # El pool pide shares de dificultad 1e6, pero la red (de juguete) es mucho más fácil:
+        # cualquier bloque debe enviarse igualmente.
+        coinb1, coinb2 = make_coinbase_parts(SCRIPT, 312_500_000, 4 + 4)
+        pool = MockPool(coinb1=coinb1, coinb2=coinb2, difficulty=1e6, nbits="1e03fffc")
+        self.addCleanup(pool.close)
+        with MinerRun(pool, threads=1) as run:
+            self.assertTrue(wait_for(lambda: len(pool.blocks) >= 1, 60), run.output())
+            self.assertTrue(wait_for(lambda: "El pool ACEPTÓ el bloque" in run.output(), 10), run.output())
 
 
 class HandshakeTests(unittest.TestCase):

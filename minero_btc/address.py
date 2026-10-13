@@ -12,6 +12,7 @@ Se aceptan:
 from __future__ import annotations
 
 import hashlib
+import re
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -39,7 +40,7 @@ def base58check_decode(text: str) -> bytes:
     for char in text:
         index = BASE58_ALPHABET.find(char)
         if index < 0:
-            raise AddressError(f"carácter no válido en Base58: {char!r}")
+            raise AddressError(f"tiene un carácter que no puede estar en una dirección de Bitcoin: {char!r}")
         number = number * 58 + index
     body = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
     leading_zeros = len(text) - len(text.lstrip("1"))
@@ -84,7 +85,7 @@ def _bech32_decode(text: str) -> tuple[str, list[int], int]:
     for char in text[sep + 1:]:
         index = BECH32_CHARSET.find(char)
         if index < 0:
-            raise AddressError(f"carácter no válido en bech32: {char!r}")
+            raise AddressError(f"tiene un carácter que no puede estar en una dirección bc1: {char!r}")
         data.append(index)
     const = _bech32_polymod(_bech32_hrp_expand(hrp) + data)
     if const not in (BECH32_CONST, BECH32M_CONST):
@@ -157,38 +158,71 @@ def address_to_script_pubkey(address: str) -> bytes:
     raise AddressError("no es una dirección de Bitcoin")
 
 
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+
 def looks_like_secret(text: str) -> bool:
     """¿Parece una frase semilla, una clave privada WIF o una clave extendida privada?"""
     stripped = text.strip()
-    words = stripped.split()
-    if len(words) >= 12 and all(word.isalpha() for word in words):
-        return True
+    if not stripped:
+        return False
+    # Frase semilla: 11 o más palabras (a veces numeradas o separadas por comas).
+    # Una dirección nunca tiene espacios ni comas.
+    if any(c.isspace() or c in ",;" for c in stripped):
+        words = [w for w in re.split(r"[\W\d_]+", stripped) if w]
+        if len(words) >= 11:
+            return True
     if stripped[:4].lower() in ("xprv", "yprv", "zprv", "tprv", "uprv", "vprv"):
         return True
-    if len(words) == 1 and 51 <= len(stripped) <= 52 and stripped[0] in "5KLc9":
+    # 32 bytes en hex (con o sin 0x, espacios o dos puntos): una clave privada en bruto.
+    compact = re.sub(r"[\s:]", "", stripped)
+    if compact[:2].lower() == "0x":
+        compact = compact[2:]
+    if len(compact) == 64 and all(c in _HEX_CHARS for c in compact):
+        return True
+    if 51 <= len(stripped) <= 52 and stripped[0] in "5KLc9":
         try:
             payload = base58check_decode(stripped)
         except AddressError:
             return False
         return payload[0] in (0x80, 0xEF) and len(payload) in (33, 34)
-    if len(words) == 1 and len(stripped) == 64:
-        try:
-            bytes.fromhex(stripped)
-            return True  # 32 bytes en hex: probablemente una clave privada en bruto
-        except ValueError:
-            return False
     return False
+
+
+_SECRET_MESSAGE = (
+    "Eso parece tu FRASE SEMILLA o una CLAVE PRIVADA. No la escribas nunca en "
+    "ningún programa ni se la des a nadie: quien la tenga se queda tu dinero. "
+    "El minero solo necesita tu dirección pública de recibir (empieza por bc1, 1 o 3)."
+)
+
+
+def _unwrap(text: str) -> str:
+    """Quita comillas y el formato ``bitcoin:DIRECCION?amount=...`` de los QR."""
+    address = text.strip().strip("\"'<>").strip()
+    if address.lower().startswith("bitcoin:"):
+        address = address[len("bitcoin:"):].split("?", 1)[0]
+    return address.strip()
 
 
 def validate_payout_address(text: str) -> tuple[str, bytes]:
     """Comprueba la dirección de cobro. Devuelve ``(dirección, scriptPubKey)``."""
     if looks_like_secret(text):
-        raise SecretDetectedError(
-            "Eso parece tu FRASE SEMILLA o una CLAVE PRIVADA. No la escribas nunca en "
-            "ningún programa ni se la des a nadie: quien la tenga se queda tu dinero. "
-            "El minero solo necesita tu dirección pública de recibir (empieza por bc1, 1 o 3)."
-        )
-    address = text.strip()
+        raise SecretDetectedError(_SECRET_MESSAGE)
+    address = _unwrap(text)
     if not address:
         raise AddressError("no has escrito ninguna dirección")
-    return address, address_to_script_pubkey(address)
+    if looks_like_secret(address):
+        raise SecretDetectedError(_SECRET_MESSAGE)
+    lowered = address.lower()
+    if lowered.startswith(("lnbc", "lntb", "lnurl")) or "@" in address:
+        raise AddressError("eso es de Lightning; el premio de un bloque necesita una dirección "
+                           "normal (on-chain) que empiece por bc1, 1 o 3")
+    if lowered.startswith("0x"):
+        raise AddressError("eso es una dirección de Ethereum, no de Bitcoin")
+    if address[0] in "48" and len(address) in (95, 106):
+        raise AddressError("eso parece una dirección de Monero; este minero necesita una de "
+                           "Bitcoin (para minar Monero mira MONERO.md)")
+    script_pubkey = address_to_script_pubkey(address)
+    if lowered.startswith("bc1"):
+        address = lowered  # los QR usan mayúsculas; los pools y exploradores, minúsculas
+    return address, script_pubkey

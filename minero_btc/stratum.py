@@ -28,6 +28,11 @@ class StratumError(Exception):
     """Error de protocolo o rechazo del pool."""
 
 
+def pool_text(value, limit: int = 200) -> str:
+    """Texto enviado por el pool, sin caracteres de control (no puede borrar ni falsear líneas)."""
+    return "".join(c if c.isprintable() else "?" for c in str(value))[:limit]
+
+
 def parse_pool_url(url: str) -> tuple[str, int, bool]:
     """Acepta ``host:puerto``, ``stratum+tcp://host:puerto`` o ``stratum+ssl://host:puerto``."""
     text = url.strip()
@@ -46,18 +51,22 @@ def parse_pool_url(url: str) -> tuple[str, int, bool]:
     port = int(port_text)
     if not 0 < port < 65536:
         raise ValueError("puerto no válido")
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        raise ValueError(f"nombre de pool no válido: {host!r}") from None
     return host, port, use_tls
 
 
 class StratumClient:
     def __init__(self, host: str, port: int, use_tls: bool = False, *,
-                 connect_timeout: float = 20.0, idle_timeout: float = 600.0):
+                 connect_timeout: float = 10.0, idle_timeout: float = 180.0):
         self.host = host
         self.port = port
         self.use_tls = use_tls
         self.connect_timeout = connect_timeout
-        # Los pools mandan trabajo nuevo cada pocos segundos o minutos; si no
-        # llega nada en este tiempo damos la conexión por muerta.
+        # public-pool manda trabajo cada 60 s y ckpool cada 30 s; si no llega
+        # nada en este tiempo damos la conexión por muerta.
         self.idle_timeout = idle_timeout
         self.events: queue.Queue = queue.Queue()
         self.extranonce1 = b""
@@ -101,9 +110,10 @@ class StratumClient:
     def _send(self, message: dict) -> None:
         data = (json.dumps(message) + "\n").encode()
         with self._send_lock:
-            if self._sock is None:
+            sock = self._sock
+            if sock is None:
                 raise ConnectionError("no hay conexión con el pool")
-            self._sock.sendall(data)
+            sock.sendall(data)
 
     def request(self, method: str, params: list) -> int:
         """Envía una petición sin esperar la respuesta (llegará como evento)."""
@@ -122,8 +132,11 @@ class StratumClient:
             self._waiters[request_id] = slot
         try:
             self._send({"id": request_id, "method": method, "params": params})
-            if not slot[0].wait(timeout):
-                raise StratumError(f"el pool no respondió a {method}")
+            # Esperas cortas: en Windows Ctrl+C no interrumpe una espera larga.
+            deadline = time.monotonic() + timeout
+            while not slot[0].wait(0.25):
+                if time.monotonic() >= deadline:
+                    raise StratumError(f"el pool no respondió a {method}")
         finally:
             with self._waiters_lock:
                 self._waiters.pop(request_id, None)
@@ -135,25 +148,38 @@ class StratumClient:
                   suggest_difficulty: float | None = None) -> None:
         result = self.call("mining.subscribe", [AGENT])
         if not isinstance(result, list) or len(result) < 3:
-            raise StratumError(f"respuesta inesperada a mining.subscribe: {result!r}")
+            raise StratumError(f"respuesta inesperada a mining.subscribe: {pool_text(result)}")
         self._set_extranonce(result[1], result[2])
+        value = None
+        if suggest_difficulty:
+            # ckpool solo acepta enteros aquí.
+            value = int(suggest_difficulty) if float(suggest_difficulty).is_integer() else suggest_difficulty
+            # public-pool solo hace caso a la primera sugerencia, y antes de autorizar
+            # evita que empiece con dificultad 100000.
+            self.request("mining.suggest_difficulty", [value])
         authorized = self.call("mining.authorize", [username, password])
         if authorized is not True:
             raise StratumError("el pool rechazó el usuario (¿dirección de wallet no válida para este pool?)")
-        if suggest_difficulty:
-            # Algunos pools (ckpool) solo aceptan enteros aquí.
-            value = int(suggest_difficulty) if float(suggest_difficulty).is_integer() else suggest_difficulty
+        if value is not None:
+            # ckpool ignora la sugerencia si llega antes de autorizar.
             self.request("mining.suggest_difficulty", [value])
 
     def submit(self, username: str, job_id: str, extranonce2: str, ntime: str, nonce: str) -> int:
         return self.request("mining.submit", [username, job_id, extranonce2, ntime, nonce])
 
     def _set_extranonce(self, extranonce1, extranonce2_size) -> None:
-        if not isinstance(extranonce1, str) or not isinstance(extranonce2_size, int):
+        if (not isinstance(extranonce1, str) or isinstance(extranonce2_size, bool)
+                or not isinstance(extranonce2_size, int)):
             raise StratumError("extranonce no válido")
         if not 1 <= extranonce2_size <= 32:
             raise StratumError(f"tamaño de extranonce2 no soportado: {extranonce2_size}")
-        self.extranonce1 = bytes.fromhex(extranonce1)
+        try:
+            extranonce1_bytes = parse_hex(extranonce1)
+        except ValueError:
+            raise StratumError(f"extranonce1 no válido: {pool_text(extranonce1, 40)}") from None
+        if len(extranonce1_bytes) > 32:
+            raise StratumError("extranonce1 demasiado largo")
+        self.extranonce1 = extranonce1_bytes
         self.extranonce2_size = extranonce2_size
 
     # --- lectura -----------------------------------------------------------------
@@ -185,8 +211,12 @@ class StratumClient:
                 *lines, buffer = buffer.split(b"\n")
                 for line in lines:
                     line = line.strip()
-                    if line:
+                    if not line:
+                        continue
+                    try:
                         self._handle_line(line)
+                    except Exception as exc:  # mensaje raro del pool: ignorarlo, no cortar
+                        self.events.put(("message", f"mensaje no válido ignorado ({type(exc).__name__})"))
         except (OSError, ValueError) as exc:
             if not self._closed.is_set():
                 reason = f"error de red: {exc}"
@@ -207,16 +237,21 @@ class StratumClient:
         try:
             message = json.loads(line)
         except ValueError:
-            self.events.put(("message", f"línea no válida del pool: {line[:200]!r}"))
+            self.events.put(("message", f"línea no válida: {pool_text(line[:200])}"))
             return
         if not isinstance(message, dict):
             return
-        method = message.get("method")
-        params = message.get("params") or []
-        if method:
-            self._handle_method(message.get("id"), method, params)
-            return
         request_id = message.get("id")
+        if not isinstance(request_id, (int, str, type(None))) or isinstance(request_id, bool):
+            return
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(params, list):
+            params = []
+        if method:
+            if isinstance(method, str):
+                self._handle_method(request_id, method, params)
+            return
         with self._waiters_lock:
             slot = self._waiters.get(request_id)
         if slot is not None:
@@ -236,13 +271,13 @@ class StratumClient:
         elif method == "client.reconnect":
             self.events.put(("reconnect", params))
         elif method == "client.show_message":
-            self.events.put(("message", str(params[0]) if params else ""))
+            self.events.put(("message", pool_text(params[0]) if params else ""))
         elif method == "client.get_version":
             self._reply(request_id, AGENT)
         elif method == "mining.ping":
             self._reply(request_id, "pong")
         elif request_id is not None:
-            self._reply(request_id, None, [20, f"método no soportado: {method}", None])
+            self._reply(request_id, None, [20, "unsupported method", None])
 
     def _reply(self, request_id, result, error=None) -> None:
         if request_id is None:
@@ -255,7 +290,17 @@ class StratumClient:
 
 def format_error(error) -> str:
     if isinstance(error, list) and len(error) >= 2:
-        return f"{error[1]} (código {error[0]})"
+        return f"{pool_text(error[1])} (código {pool_text(error[0], 20)})"
     if isinstance(error, dict):
-        return str(error.get("message") or error)
-    return str(error)
+        return pool_text(error.get("message") or error)
+    return pool_text(error)
+
+
+def parse_hex(value, nbytes: int | None = None) -> bytes:
+    """Hex estricto (sin espacios) y, si se indica, con longitud exacta en bytes."""
+    if not isinstance(value, str) or len(value) % 2 or not all(c in "0123456789abcdefABCDEF" for c in value):
+        raise ValueError("hex no válido")
+    data = bytes.fromhex(value)
+    if nbytes is not None and len(data) != nbytes:
+        raise ValueError(f"se esperaban {nbytes} bytes")
+    return data

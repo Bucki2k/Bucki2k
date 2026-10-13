@@ -66,6 +66,43 @@ class AddressTests(unittest.TestCase):
                         "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"):
             self.assertFalse(looks_like_secret(address))
 
+    def test_common_paste_formats(self):
+        expected = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        for pasted in ("bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4?amount=0.1&label=x",
+                       "BITCOIN:BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+                       '"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"',
+                       "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"):
+            with self.subTest(pasted=pasted):
+                self.assertEqual(validate_payout_address(pasted)[0], expected)
+
+    def test_friendly_errors_for_other_networks(self):
+        cases = {
+            "lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypq": "Lightning",
+            "satoshi@walletofsatoshi.com": "Lightning",
+            "0x52908400098527886E0F7030069857D2E4169EE7": "Ethereum",
+            "4" + "A" * 94: "Monero",
+        }
+        for text, word in cases.items():
+            with self.subTest(text=text[:12]):
+                with self.assertRaises(AddressError) as ctx:
+                    validate_payout_address(text)
+                self.assertIn(word, str(ctx.exception))
+
+    def test_more_secret_formats_are_refused(self):
+        words = ["abandon"] * 11 + ["about"]
+        secrets = [
+            ", ".join(words),
+            " ".join(f"{i}. {w}" for i, w in enumerate(words, 1)),
+            " ".join(words[:11]),  # una palabra perdida al copiar
+            "0x0c28fca386c7a227600b2fe50b7cae11ec86d3bf1fbe471be89827e19d72aa1d",
+            "0c28 fca3 86c7 a227 600b 2fe5 0b7c ae11 ec86 d3bf 1fbe 471b e898 27e1 9d72 aa1d",
+            "KwdMAjGmerYanjeui5SHS7JkmpZvVipYvB2LJGU1ZxJwYvP98617",  # WIF comprimida
+        ]
+        for secret in secrets:
+            with self.subTest(secret=secret[:15]):
+                with self.assertRaises(SecretDetectedError):
+                    validate_payout_address(secret)
+
     def test_whitespace_is_trimmed(self):
         address, _ = validate_payout_address("  bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4\n")
         self.assertEqual(address, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")

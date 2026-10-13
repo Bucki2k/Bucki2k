@@ -36,9 +36,20 @@ def make_coinbase_parts(script_pubkey: bytes, value_sats: int, extranonce_len: i
 class MockPool:
     def __init__(self, *, coinb1: str, coinb2: str, difficulty: float, nbits: str = "1d00ffff",
                  extranonce1: str = "f000000a", extranonce2_size: int = 4,
-                 authorize_result=True, disconnect_after_shares: int | None = None):
+                 authorize_result=True, disconnect_after_shares: int | None = None,
+                 raw_after_authorize: tuple = (), followup_coinb2: str | None = None,
+                 followup_delay: float = 1.0):
         self.coinb1 = coinb1
         self.coinb2 = coinb2
+        # Líneas en bruto (posiblemente malformadas) que se envían tras autorizar.
+        self.raw_after_authorize = raw_after_authorize
+        # Segundo trabajo (job2) con otra coinbase, enviado al cabo de un rato.
+        self.jobs = {"job1": coinb2}
+        if followup_coinb2 is not None:
+            self.jobs["job2"] = followup_coinb2
+        self.followup_delay = followup_delay
+        self.blocks: list[dict] = []
+        self._send_lock = threading.Lock()
         self.difficulty = difficulty
         self.nbits = nbits
         self.extranonce1 = extranonce1
@@ -81,7 +92,17 @@ class MockPool:
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     def _send(self, conn, message) -> None:
-        conn.sendall((json.dumps(message) + "\n").encode())
+        data = message if isinstance(message, str) else json.dumps(message)
+        with self._send_lock:
+            conn.sendall((data + "\n").encode())
+
+    def _notify(self, conn, job_id: str, clean: bool) -> None:
+        try:
+            self._send(conn, {"id": None, "method": "mining.notify", "params": [
+                job_id, self.prevhash, self.coinb1, self.jobs[job_id], self.branches,
+                self.version, self.nbits, self.ntime, clean]})
+        except OSError:
+            pass
 
     def _serve(self, conn: socket.socket) -> None:
         shares_this_connection = 0
@@ -102,12 +123,15 @@ class MockPool:
                 elif method == "mining.authorize":
                     self._send(conn, {"id": request_id, "result": self.authorize_result, "error": None})
                     if self.authorize_result is True:
+                        for raw in self.raw_after_authorize:
+                            self._send(conn, raw)
                         self._send(conn, {"id": 9001, "method": "mining.ping", "params": []})
                         self._send(conn, {"id": None, "method": "mining.set_difficulty",
                                           "params": [self.difficulty]})
-                        self._send(conn, {"id": None, "method": "mining.notify", "params": [
-                            "job1", self.prevhash, self.coinb1, self.coinb2, self.branches,
-                            self.version, self.nbits, self.ntime, True]})
+                        self._notify(conn, "job1", True)
+                        if "job2" in self.jobs:
+                            threading.Timer(self.followup_delay, self._notify,
+                                            args=(conn, "job2", False)).start()
                 elif method == "mining.suggest_difficulty":
                     self._send(conn, {"id": request_id, "result": True, "error": None})
                 elif method == "mining.submit":
@@ -125,14 +149,14 @@ class MockPool:
 
     def _check_share(self, params) -> tuple[bool, str]:
         _user, job_id, extranonce2, ntime, nonce = params
-        if job_id != "job1":
+        if job_id not in self.jobs:
             return False, "trabajo desconocido"
         if len(extranonce2) != 2 * self.extranonce2_size or len(nonce) != 8 or len(ntime) != 8:
             return False, "longitud incorrecta"
         if (extranonce2, ntime, nonce) in self._seen_shares:
             return False, "share duplicada"
         self._seen_shares.add((extranonce2, ntime, nonce))
-        coinbase = bytes.fromhex(self.coinb1 + self.extranonce1 + extranonce2 + self.coinb2)
+        coinbase = bytes.fromhex(self.coinb1 + self.extranonce1 + extranonce2 + self.jobs[job_id])
         root = dsha(coinbase)
         for branch in self.branches:
             root = dsha(root + bytes.fromhex(branch))
@@ -142,6 +166,13 @@ class MockPool:
                   + bytes.fromhex(self.nbits)[::-1] + bytes.fromhex(nonce)[::-1])
         value = int.from_bytes(dsha(header), "little")
         target = int(0x00000000FFFF0000000000000000000000000000000000000000000000000000 / self.difficulty)
+        bits = int(self.nbits, 16)
+        network_target = (bits & 0x007FFFFF) << (8 * ((bits >> 24) - 3))
+        if value <= network_target:
+            # Como ckpool: un bloque vale aunque no llegue a la dificultad de share.
+            with self.lock:
+                self.blocks.append({"job_id": job_id, "nonce": nonce})
+            return True, ""
         if value > target:
             return False, "dificultad baja"
         return True, ""

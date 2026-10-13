@@ -3,13 +3,18 @@
 Cada proceso usa un núcleo. Recibe trabajos por su cola, va cambiando el
 extranonce2 (cada proceso usa valores distintos para no repetir trabajo) y
 recorre los 2^32 nonces de cada cabecera. Optimización "midstate": los
-primeros 64 bytes de la cabecera no cambian con el nonce, así que su estado
+primeros 76 bytes de la cabecera no cambian con el nonce, así que su estado
 SHA-256 se calcula una vez y se copia para cada nonce.
+
+Para no quedarse bloqueado si se pulsa Ctrl+C justo en mal momento, el bucle
+principal no usa ningún candado compartido: cada proceso escribe solo su
+propio contador de hashes y lee una bandera de parada sin candado.
 """
 
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import queue
 import struct
@@ -26,37 +31,44 @@ from .consensus import (
 
 CHUNK = 1 << 15  # nonces entre comprobaciones de trabajo nuevo (~30 ms)
 NONCE_LIMIT = 1 << 32
-_ZERO4 = b"\x00\x00\x00\x00"
-_TOP_32_BITS = 1 << 224
+PARENT_CHECK_CHUNKS = 32  # ~1 s entre comprobaciones de que el proceso principal sigue vivo
+MAX_REPORTS_PER_CHUNK = 16  # tope de resultados por bloque de nonces (se guardan los mejores)
+_TOP_8_BITS = 1 << 248
 
 
 def scan(prefix76: bytes, start: int, end: int, report_target: int) -> list[tuple[int, bytes]]:
     """Prueba los nonces ``[start, end)`` y devuelve los ``(nonce, hash)`` con hash <= objetivo."""
     sha256 = hashlib.sha256
     pack = struct.Struct("<I").pack
-    copy = sha256(prefix76[:64]).copy
-    tail = prefix76[64:76]
+    # Midstate: 64 bytes ya comprimidos y los 12 siguientes en el búfer.
+    copy = sha256(prefix76).copy
+    # Copiar un contexto vacío es más barato que llamar a sha256(datos).
+    empty = sha256().copy
     found = []
-    if report_target < _TOP_32_BITS:
-        # Camino rápido: un hash que cumple tiene sus 4 bytes más altos a cero.
+    if report_target < _TOP_8_BITS:
+        # Un hash que cumple tiene a cero su byte más alto (digest[31]).
         for nonce in range(start, end):
             h = copy()
-            h.update(tail + pack(nonce))
-            digest = sha256(h.digest()).digest()
-            if digest.endswith(_ZERO4) and int.from_bytes(digest, "little") <= report_target:
+            h.update(pack(nonce))
+            h2 = empty()
+            h2.update(h.digest())
+            digest = h2.digest()
+            if not digest[31] and int.from_bytes(digest, "little") <= report_target:
                 found.append((nonce, digest))
     else:
         for nonce in range(start, end):
             h = copy()
-            h.update(tail + pack(nonce))
-            digest = sha256(h.digest()).digest()
+            h.update(pack(nonce))
+            h2 = empty()
+            h2.update(h.digest())
+            digest = h2.digest()
             if int.from_bytes(digest, "little") <= report_target:
                 found.append((nonce, digest))
     return found
 
 
 def lower_priority() -> None:
-    """Prioridad mínima: el PC sigue respondiendo (juegos, navegador...)."""
+    """Prioridad mínima: el PC sigue respondiendo mientras mina."""
     try:
         if sys.platform == "win32":
             import ctypes
@@ -69,13 +81,21 @@ def lower_priority() -> None:
         pass
 
 
-def worker_main(index, n_workers, job_queue, result_queue, hash_counter, stop_event, low_priority):
+def worker_main(index, n_workers, job_queue, result_queue, hash_counts, stop_flag, low_priority):
     try:
         if low_priority:
             lower_priority()
-        _work(index, n_workers, job_queue, result_queue, hash_counter, stop_event)
+        _work(index, n_workers, job_queue, result_queue, hash_counts, stop_flag)
     except KeyboardInterrupt:
         pass
+    finally:
+        # Nada de lo que quede en la cola se va a enviar ya: no esperar a vaciarla.
+        result_queue.cancel_join_thread()
+
+
+def _parent_alive() -> bool:
+    parent = multiprocessing.parent_process()
+    return parent is None or parent.is_alive()
 
 
 def _next_message(job_queue, block: bool):
@@ -85,32 +105,43 @@ def _next_message(job_queue, block: bool):
         return None
 
 
-def _work(index, n_workers, job_queue, result_queue, hash_counter, stop_event) -> None:
+def _work(index, n_workers, job_queue, result_queue, hash_counts, stop_flag) -> None:
     message = None
-    while not stop_event.is_set():
+    # El contador de extranonce2 sigue entre trabajos: si el pool repite un
+    # trabajo (por ejemplo tras reconectar), no se repiten shares ya enviadas.
+    state = {"extranonce2_counter": 0}
+    while not stop_flag.value:
         if message is None:
             message = _next_message(job_queue, block=True)
+            if message is None and not _parent_alive():
+                return
             continue
         if message == "stop":
             return
         if message == "pause":
             message = None
             continue
-        message = _mine_job(message, index, n_workers, job_queue, result_queue, hash_counter, stop_event)
+        try:
+            message = _mine_job(message, index, n_workers, job_queue, result_queue,
+                                hash_counts, stop_flag, state)
+        except Exception as exc:  # trabajo malformado: descartarlo y esperar el siguiente
+            result_queue.put({"error": f"{type(exc).__name__}: {exc}"[:300]})
+            message = None
 
 
-def _mine_job(job, index, n_workers, job_queue, result_queue, hash_counter, stop_event):
+def _mine_job(job, index, n_workers, job_queue, result_queue, hash_counts, stop_flag, state):
     """Mina ``job`` hasta que llegue otro mensaje por la cola y lo devuelve (None si no hay)."""
     size = job["extranonce2_size"]
     share_target = job["share_target"]
     network_target = job["network_target"]
     # También informamos de hashes de dificultad >= 1 para la estadística de "mejor share".
-    report_target = max(share_target, DIFF1_TARGET)
-    counter = 0
+    report_target = max(share_target, network_target, DIFF1_TARGET)
+    chunks = 0
     while True:
-        extranonce2_value = index + counter * n_workers
-        counter += 1
+        extranonce2_value = index + state["extranonce2_counter"] * n_workers
+        state["extranonce2_counter"] += 1
         if extranonce2_value >= 1 << (8 * size):
+            state["extranonce2_counter"] = 0
             return None  # espacio de extranonce2 agotado: esperar trabajo nuevo
         extranonce2 = extranonce2_value.to_bytes(size, "big")
         coinbase = build_coinbase(job["coinb1"], job["extranonce1"], extranonce2, job["coinb2"])
@@ -118,7 +149,12 @@ def _mine_job(job, index, n_workers, job_queue, result_queue, hash_counter, stop
                                      merkle_root(coinbase, job["merkle_branch"]),
                                      job["ntime"], job["nbits"])
         for start in range(0, NONCE_LIMIT, CHUNK):
-            for nonce, digest in scan(prefix, start, start + CHUNK, report_target):
+            found = scan(prefix, start, start + CHUNK, report_target)
+            if len(found) > MAX_REPORTS_PER_CHUNK:
+                # Solo pasa con objetivos absurdos: quedarse con los mejores hashes.
+                found.sort(key=lambda item: int.from_bytes(item[1], "little"))
+                del found[MAX_REPORTS_PER_CHUNK:]
+            for nonce, digest in found:
                 value = int.from_bytes(digest, "little")
                 result_queue.put({
                     "seq": job["seq"],
@@ -130,10 +166,12 @@ def _mine_job(job, index, n_workers, job_queue, result_queue, hash_counter, stop
                     "is_share": value <= share_target,
                     "is_block": value <= network_target,
                 })
-            with hash_counter.get_lock():
-                hash_counter.value += CHUNK
-            if stop_event.is_set():
-                return None
+            hash_counts[index] += CHUNK
+            chunks += 1
+            if stop_flag.value:
+                return "stop"
+            if chunks % PARENT_CHECK_CHUNKS == 0 and not _parent_alive():
+                return "stop"
             message = _next_message(job_queue, block=False)
             if message is not None:
                 return message
