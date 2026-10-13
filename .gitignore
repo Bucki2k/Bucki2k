@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Tu dirección y tu pool guardados por el minero
+minero_config.json
