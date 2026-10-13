@@ -34,7 +34,8 @@ de media en encontrar un bloque, con la dificultad de octubre de 2026 (~132,7 T)
   encontró el bloque 957.382 a través de public-pool.io y se llevó ~3,14 BTC.
   A tu velocidad, la probabilidad es unas 100.000 veces menor que la suya.
 - Si quieres **ganar algo de verdad** con tu PC, mira [MONERO.md](MONERO.md):
-  tu 9800X3D es de los mejores procesadores para minar Monero.
+  tu 9800X3D es de los mejores procesadores para minar Monero (unos 13–15 $
+  al mes con la luz gratis, pagados directamente a tu wallet).
 
 ## Qué hace este minero
 
@@ -118,6 +119,18 @@ En Linux y macOS usa `python3` en lugar de `py`.
    hay que reclamarla ni esperar a ningún pago del pool.
 3. Bitcoin exige **100 confirmaciones** (unas 17 horas) antes de poder gastar
    una recompensa de minería. Puedes buscar el bloque en <https://mempool.space>.
+
+## Si quieres jugar a la lotería de Bitcoin con más boletos
+
+Un **Bitaxe Gamma** (~1,1–1,2 TH/s, ~20 W, unos 120–220 €) es unas 100.000
+veces más rápido que tu PC con este minero, y el bloque de julio de 2026 lo
+encontró uno de estos aparatos. Aun así, de media tardaría unos 15.000 años en
+encontrar un bloque.
+
+Si compras uno, cuidado: su firmware viene apuntando a `public-pool.io:3333`,
+pero con una **dirección de ejemplo que no es tuya**. Cámbiala por la tuya
+tanto en el pool principal como en el de respaldo, o cualquier premio sería
+para otra persona.
 
 ## Pools en solitario
 
