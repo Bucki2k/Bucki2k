@@ -23,7 +23,7 @@ from minero_btc.address import AddressError, SecretDetectedError, validate_payou
 from minero_btc.miner import Miner, MinerConfig, log_line, run_benchmark
 from minero_btc.stratum import parse_pool_url
 
-DEFAULT_POOL = "public-pool.io:21496"
+DEFAULT_POOL = "public-pool.io:3333"
 CONFIG_FILE = Path(__file__).resolve().parent / "minero_config.json"
 
 

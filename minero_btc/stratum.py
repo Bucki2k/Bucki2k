@@ -42,7 +42,7 @@ def parse_pool_url(url: str) -> tuple[str, int, bool]:
     text = text.rstrip("/")
     host, sep, port_text = text.rpartition(":")
     if not sep or not host or not port_text.isdigit():
-        raise ValueError("el pool debe tener la forma host:puerto (p. ej. public-pool.io:21496)")
+        raise ValueError("el pool debe tener la forma host:puerto (p. ej. public-pool.io:3333)")
     port = int(port_text)
     if not 0 < port < 65536:
         raise ValueError("puerto no válido")
@@ -51,7 +51,7 @@ def parse_pool_url(url: str) -> tuple[str, int, bool]:
 
 class StratumClient:
     def __init__(self, host: str, port: int, use_tls: bool = False, *,
-                 connect_timeout: float = 20.0, idle_timeout: float = 300.0):
+                 connect_timeout: float = 20.0, idle_timeout: float = 600.0):
         self.host = host
         self.port = port
         self.use_tls = use_tls

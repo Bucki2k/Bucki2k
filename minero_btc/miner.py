@@ -326,7 +326,7 @@ class Miner:
                 self.log("El resto de la recompensa es la comisión del pool.")
         else:
             self.log("ATENCIÓN: el bloque que prepara este pool NO paga a tu dirección. Este pool no "
-                     "es de minería en solitario (o algo va mal). Usa public-pool.io:21496 o "
+                     "es de minería en solitario (o algo va mal). Usa public-pool.io:3333 o "
                      "solo.ckpool.org:3333 si quieres que la recompensa llegue directa a tu wallet.")
 
     # --- resultados de los procesos ----------------------------------------------
