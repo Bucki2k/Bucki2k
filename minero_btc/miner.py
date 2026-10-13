@@ -177,8 +177,10 @@ class _PreventSleep:
             return
         try:
             import ctypes
+            from ctypes import wintypes
             self._set = ctypes.windll.kernel32.SetThreadExecutionState
-            self._set.argtypes = [ctypes.c_uint]
+            self._set.argtypes = [wintypes.DWORD]
+            self._set.restype = wintypes.DWORD
             self.active = bool(self._set(self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED))
         except (AttributeError, OSError):
             self.active = False

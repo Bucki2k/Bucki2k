@@ -174,9 +174,14 @@ def _prepare_console() -> None:
     # Esc, y con él el envío de shares y bloques.
     try:
         import ctypes
+        from ctypes import wintypes
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-        mode = ctypes.c_uint32()
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        handle = kernel32.GetStdHandle(-10 & 0xFFFFFFFF)  # STD_INPUT_HANDLE como DWORD
+        mode = wintypes.DWORD()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             enable_quick_edit, enable_extended_flags = 0x0040, 0x0080
             kernel32.SetConsoleMode(handle, (mode.value & ~enable_quick_edit) | enable_extended_flags)

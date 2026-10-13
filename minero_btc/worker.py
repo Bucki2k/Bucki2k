@@ -72,8 +72,12 @@ def lower_priority() -> None:
     try:
         if sys.platform == "win32":
             import ctypes
+            from ctypes import wintypes
             idle_priority_class = 0x00000040
             kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.SetPriorityClass.restype = wintypes.BOOL
             kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), idle_priority_class)
         else:
             os.nice(19)
